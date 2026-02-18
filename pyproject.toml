@@ -1,28 +1,25 @@
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
-[project]
+[tool.poetry]
 name = "shade"
 version = "0.1.0"
-authors = [
-  { name="Shade Developer", email="developer@shdeprotocol.io" },
-]
 description = "A payment gateway system for Shade Protocol."
+authors = ["Shade Developer <developer@shdeprotocol.io>"]
 readme = "README.md"
-requires-python = ">=3.8"
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
-]
+packages = [{include = "shade", from = "src"}]
 
-[project.urls]
-Homepage = "https://github.com/ShadeProtocol/shade-python"
-Issues = "https://github.com/ShadeProtocol/shade-python/issues"
+[tool.poetry.dependencies]
+python = "^3.10"
+stellar-sdk = "^13.2.1"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+flake8 = "^6.1.0"
+black = "^23.7.0"
+isort = "^5.12.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
