@@ -108,6 +108,37 @@ def _raise_for_status(
 
 
 # ---------------------------------------------------------------------------
+# Shared request-building
+# ---------------------------------------------------------------------------
+
+def _build_url(base_url: str, path: str) -> str:
+    return f"{base_url}/{path.lstrip('/')}"
+
+
+def _build_headers(api_key: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+def _build_request(
+    method: str,
+    base_url: str,
+    path: str,
+    payload: Optional[Dict[str, Any]],
+) -> Tuple[str, str, Dict[str, str], Optional[Dict[str, Any]]]:
+    """Shared URL + header + payload helper for sync and async clients."""
+    url = _build_url(base_url, path)
+    headers = _build_headers(api_key="")
+    return method.upper(), url, headers, payload
+
+
+
+
+
+# ---------------------------------------------------------------------------
 # Synchronous client
 # ---------------------------------------------------------------------------
 
@@ -144,13 +175,22 @@ class SyncHTTPClient:
     def _build_request(
         self, method: str, path: str, payload: Optional[Dict[str, Any]]
     ) -> urllib.request.Request:
-        url = f"{self.base_url}/{path.lstrip('/')}"
+        method_u, url, headers, data = _build_request(
+            method,
+            self.base_url,
+            path,
+            payload,
+        )
+        # inject headers with api_key
+        headers = _build_headers(self.api_key)
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
-        req = urllib.request.Request(url, data=data, method=method.upper())
-        req.add_header("Authorization", f"Bearer {self.api_key}")
-        req.add_header("Content-Type", "application/json")
-        req.add_header("Accept", "application/json")
+
+
+        req = urllib.request.Request(url, data=data, method=method_u)
+        for k, v in headers.items():
+            req.add_header(k, v)
         return req
+
 
     def request(
         self,
@@ -198,19 +238,15 @@ class SyncHTTPClient:
 
 
 # ---------------------------------------------------------------------------
-# Asynchronous client
+# Asynchronous client (httpx)
 # ---------------------------------------------------------------------------
 
-class AsyncHTTPClient:
-    """
-    Async counterpart of ``SyncHTTPClient``.  Uses ``aiohttp`` under the hood.
-
-    Parameters
-    ----------
-    Same as ``SyncHTTPClient``.
-    """
+class _AsyncHTTPClient:
+    """Async counterpart of ``SyncHTTPClient`` using ``httpx.AsyncClient``."""
 
     def __init__(
+
+
         self,
         base_url: str,
         api_key: str,
@@ -222,6 +258,23 @@ class AsyncHTTPClient:
         self.api_key = api_key
         self.max_retries = max_retries
         self.timeout = timeout
+        self._client = None
+
+    async def _get_client(self):
+        import httpx
+
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self.timeout),
+                headers=_build_headers(self.api_key),
+            )
+
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def request(
         self,
@@ -229,58 +282,54 @@ class AsyncHTTPClient:
         path: str,
         payload: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """
-        Async HTTP request with 429 retry using ``asyncio.sleep``.
-
-        Returns
-        -------
-        dict
-            Parsed JSON response body.
-
-        Raises
-        ------
-        RateLimitError, HTTPError
-            Same semantics as ``SyncHTTPClient.request``.
-        ImportError
-            If ``aiohttp`` is not installed.
-        """
-        import asyncio  # stdlib — always available
+        import asyncio
 
         try:
-            import aiohttp
+            import httpx  # noqa: F401
         except ImportError as exc:
             raise ImportError(
-                "aiohttp is required for async support. "
-                "Install it with: pip install aiohttp"
+                "httpx is required for async HTTP support. "
+                "Install it with: pip install httpx"
             ) from exc
 
-        url_base = self.base_url
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-        connector = aiohttp.TCPConnector()
-        timeout_cfg = aiohttp.ClientTimeout(total=self.timeout)
-
         attempt = 0
-        async with aiohttp.ClientSession(
-            connector=connector, timeout=timeout_cfg
-        ) as session:
-            while True:
-                url = f"{url_base}/{path.lstrip('/')}"
-                resp = await session.request(
-                    method.upper(),
-                    url,
-                    json=payload,
-                    headers=headers,
-                )
-                body = await resp.read()
-                wait = _raise_for_status(
-                    resp.status, resp.headers, body, attempt, self.max_retries
-                )
-                if wait is None:
-                    return json.loads(body) if body else {}
-                # 429 — non-blocking sleep
-                await asyncio.sleep(wait)
-                attempt += 1
+        while True:
+            url = _build_url(self.base_url, path)
+            client = await self._get_client()
+
+            req_method = method.upper()
+
+            # Use httpx request with json=payload
+            resp = await client.request(req_method, url, json=payload)
+
+
+            body = resp.content
+
+
+            wait = _raise_for_status(
+                resp.status_code, resp.headers, body, attempt, self.max_retries
+            )
+            if wait is None:
+                return json.loads(body) if body else {}
+            await asyncio.sleep(wait)
+            attempt += 1
+
+
+class AsyncHTTPClient(_AsyncHTTPClient):
+    """Public async client (httpx-based)."""
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        timeout: float = 30.0,
+    ) -> None:
+        super().__init__(
+            base_url=base_url,
+            api_key=api_key,
+            max_retries=max_retries,
+            timeout=timeout,
+        )
+
+
