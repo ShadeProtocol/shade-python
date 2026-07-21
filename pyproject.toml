@@ -9,6 +9,7 @@ packages = [{include = "shade", from = "src"}]
 [tool.poetry.dependencies]
 python = "^3.10"
 httpx = "^0.28.1"
+pydantic = "^2.0"
 stellar-sdk = "^13.2.1"
 
 [tool.poetry.group.dev.dependencies]
