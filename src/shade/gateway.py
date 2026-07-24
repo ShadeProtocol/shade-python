@@ -142,6 +142,10 @@ class Gateway:
     # Async API
     # ------------------------------------------------------------------
 
+    async def aclose(self) -> None:
+        """Explicitly close the underlying async HTTP client."""
+        await self._async_http.aclose()
+
     async def process_payment_async(
         self, amount: float, currency: str
     ) -> Dict[str, Any]:

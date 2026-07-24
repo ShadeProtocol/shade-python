@@ -21,6 +21,8 @@ from io import BytesIO
 from typing import List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+
 import pytest
 
 from shade import RateLimitError
@@ -330,7 +332,7 @@ class TestSyncHTTPClientRateLimit:
 
 
 # ---------------------------------------------------------------------------
-# AsyncHTTPClient
+# AsyncHTTPClient (httpx.AsyncClient)
 # ---------------------------------------------------------------------------
 
 class TestAsyncHTTPClientRateLimit:
@@ -352,38 +354,33 @@ class TestAsyncHTTPClientRateLimit:
         client = self._client(max_retries=3)
 
         responses = [
-            (429, {"Retry-After": "2"}, _fake_429_body()),
-            (200, {}, _fake_200_body()),
+            {"status": 429, "headers": {"Retry-After": "2"}, "content": _fake_429_body()},
+            {"status": 200, "headers": {}, "content": _fake_200_body()},
         ]
 
         async def run():
-            aiohttp = pytest.importorskip("aiohttp")
             idx = 0
 
             async def fake_request(*args, **kwargs):
                 nonlocal idx
-                status, hdrs, body = responses[idx]
+                resp_data = responses[idx]
                 idx += 1
-                mock_resp = AsyncMock()
-                mock_resp.status = status
-                mock_resp.headers = hdrs
-                mock_resp.read = AsyncMock(return_value=body)
-                mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-                mock_resp.__aexit__ = AsyncMock(return_value=False)
+                mock_resp = AsyncMock(spec=httpx.Response)
+                mock_resp.status_code = resp_data["status"]
+                mock_resp.headers = resp_data["headers"]
+                mock_resp.content = resp_data["content"]
                 return mock_resp
 
             sleep_calls = []
 
-            with patch("aiohttp.ClientSession") as mock_session_cls, \
-                 patch("asyncio.sleep", new_callable=AsyncMock,
-                       side_effect=lambda s: sleep_calls.append(s)):
-                mock_session = AsyncMock()
-                mock_session.request = fake_request
-                mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-                mock_session.__aexit__ = AsyncMock(return_value=False)
-                mock_session_cls.return_value = mock_session
+            with patch.object(client, "_get_client") as mock_get_client:
+                mock_client = AsyncMock(spec=httpx.AsyncClient)
+                mock_client.request = fake_request
+                mock_get_client.return_value = mock_client
 
-                result = await client.request("POST", "/payments", {})
+                with patch("asyncio.sleep", new_callable=AsyncMock,
+                          side_effect=lambda s: sleep_calls.append(s)):
+                    result = await client.request("POST", "/payments", {})
 
             assert result == {"id": "pay_123", "status": "ok"}
             assert sleep_calls == [2]  # asyncio.sleep, not time.sleep
@@ -396,30 +393,25 @@ class TestAsyncHTTPClientRateLimit:
         client = self._client(max_retries=1)
 
         async def run():
-            aiohttp = pytest.importorskip("aiohttp")
             call_count = 0
 
             async def fake_request(*args, **kwargs):
                 nonlocal call_count
                 call_count += 1
-                mock_resp = AsyncMock()
-                mock_resp.status = 429
+                mock_resp = AsyncMock(spec=httpx.Response)
+                mock_resp.status_code = 429
                 mock_resp.headers = {"Retry-After": "10"}
-                mock_resp.read = AsyncMock(return_value=_fake_429_body())
-                mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-                mock_resp.__aexit__ = AsyncMock(return_value=False)
+                mock_resp.content = _fake_429_body()
                 return mock_resp
 
-            with patch("aiohttp.ClientSession") as mock_session_cls, \
-                 patch("asyncio.sleep", new_callable=AsyncMock):
-                mock_session = AsyncMock()
-                mock_session.request = fake_request
-                mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-                mock_session.__aexit__ = AsyncMock(return_value=False)
-                mock_session_cls.return_value = mock_session
+            with patch.object(client, "_get_client") as mock_get_client:
+                mock_client = AsyncMock(spec=httpx.AsyncClient)
+                mock_client.request = fake_request
+                mock_get_client.return_value = mock_client
 
-                with pytest.raises(RateLimitError) as exc_info:
-                    await client.request("POST", "/payments", {})
+                with patch("asyncio.sleep", new_callable=AsyncMock):
+                    with pytest.raises(RateLimitError) as exc_info:
+                        await client.request("POST", "/payments", {})
 
             assert exc_info.value.retry_after == 10
             # 1 initial + 1 retry = 2 total attempts
@@ -433,37 +425,64 @@ class TestAsyncHTTPClientRateLimit:
         client = self._client(max_retries=1)
 
         async def run():
-            pytest.importorskip("aiohttp")
             responses = [
-                (429, {"Retry-After": "3"}, _fake_429_body()),
-                (200, {}, _fake_200_body()),
+                {"status": 429, "headers": {"Retry-After": "3"}, "content": _fake_429_body()},
+                {"status": 200, "headers": {}, "content": _fake_200_body()},
             ]
             idx = 0
 
             async def fake_request(*args, **kwargs):
                 nonlocal idx
-                status, hdrs, body = responses[idx]
+                resp_data = responses[idx]
                 idx += 1
-                mock_resp = AsyncMock()
-                mock_resp.status = status
-                mock_resp.headers = hdrs
-                mock_resp.read = AsyncMock(return_value=body)
-                mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-                mock_resp.__aexit__ = AsyncMock(return_value=False)
+                mock_resp = AsyncMock(spec=httpx.Response)
+                mock_resp.status_code = resp_data["status"]
+                mock_resp.headers = resp_data["headers"]
+                mock_resp.content = resp_data["content"]
                 return mock_resp
 
-            with patch("aiohttp.ClientSession") as mock_session_cls, \
-                 patch("asyncio.sleep", new_callable=AsyncMock) as mock_async_sleep, \
-                 patch("time.sleep") as mock_sync_sleep:
-                mock_session = AsyncMock()
-                mock_session.request = fake_request
-                mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-                mock_session.__aexit__ = AsyncMock(return_value=False)
-                mock_session_cls.return_value = mock_session
+            with patch.object(client, "_get_client") as mock_get_client:
+                mock_client = AsyncMock(spec=httpx.AsyncClient)
+                mock_client.request = fake_request
+                mock_get_client.return_value = mock_client
 
-                await client.request("POST", "/payments", {})
+                with patch("asyncio.sleep", new_callable=AsyncMock) as mock_async_sleep, \
+                     patch("time.sleep") as mock_sync_sleep:
+                    await client.request("POST", "/payments", {})
 
             mock_async_sleep.assert_called_once_with(3)
             mock_sync_sleep.assert_not_called()
 
         self._run(run())
+
+
+@pytest.mark.asyncio
+async def test_async_client_matches_sync_response_shape_and_closes():
+    """The httpx transport preserves shared request logic and async cleanup."""
+    observed_request = None
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal observed_request
+        observed_request = request
+        return httpx.Response(200, json={"data": [{"id": "pay_123"}]})
+
+    transport = httpx.MockTransport(handler)
+    http_client = httpx.AsyncClient(transport=transport)
+    client = AsyncHTTPClient(
+        base_url="https://api.example.com/",
+        api_key="test-key",
+    )
+    client._client = http_client
+
+    response = await client.request("GET", "/payments")
+
+    assert response == {"data": [{"id": "pay_123"}]}
+    assert observed_request is not None
+    assert str(observed_request.url) == "https://api.example.com/payments"
+    assert observed_request.headers["Authorization"] == "Bearer test-key"
+    assert observed_request.headers["Accept"] == "application/json"
+
+    await client.aclose()
+
+    assert http_client.is_closed
+    assert client._client is None

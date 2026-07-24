@@ -4,11 +4,14 @@ Low-level HTTP transport for the Shade SDK.
 Handles:
 * HTTP 429 rate-limit detection and ``Retry-After`` parsing
 * Automatic retry with ``Retry-After`` wait (or exponential back-off fallback)
-* Sync (``urllib.request``) and async (``asyncio`` + ``aiohttp`` if available,
-  otherwise raises ``ImportError`` with a helpful message) paths
+* Sync (``urllib.request``) and async (``httpx.AsyncClient``) paths
+
+Both clients share a common ``_build_request`` helper so URL-building,
+header logic, and payload encoding stay in one place.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -19,8 +22,10 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, Optional, Tuple
 
-from .config import DEFAULT_MAX_RETRIES, validate_client_settings
+import httpx
+
 from . import config as _config
+from .config import DEFAULT_MAX_RETRIES, validate_client_settings
 from .errors import (
     AuthenticationError,
     HTTPError,
@@ -32,11 +37,6 @@ from .errors import (
 )
 
 logger = logging.getLogger(__name__)
-
-try:  # pragma: no cover - optional dependency
-    import httpx
-except ImportError:  # pragma: no cover - optional dependency
-    httpx = None
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -54,6 +54,41 @@ def _validate_base_url(url: str) -> None:
             f"base_url must use http:// or https://, got: {url!r}"
         )
 
+
+# ---------------------------------------------------------------------------
+# Shared request builder
+# ---------------------------------------------------------------------------
+
+def _build_request(
+    method: str,
+    path: str,
+    base_url: str,
+    api_key: str,
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Build common request parameters shared by sync and async clients.
+
+    Returns a dict with keys:
+    - ``url``: fully-qualified URL
+    - ``headers``: dict with Authorization, Content-Type, Accept
+    - ``json``: the payload dict (or ``None``)
+    - ``method``: uppercased HTTP method
+    """
+    url = f"{base_url}/{path.lstrip('/')}"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    return {
+        "url": url,
+        "headers": headers,
+        "json": payload,
+        "method": method.upper(),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -61,7 +96,7 @@ def _validate_base_url(url: str) -> None:
 def _parse_retry_after(headers: Any) -> Optional[int]:
     """Return integer seconds from a ``Retry-After`` header, or ``None``."""
     value = None
-    # urllib HTTPMessage / http.client.HTTPMessage
+    # urllib HTTPMessage / http.client.HTTPMessage / httpx.Headers
     if hasattr(headers, "get"):
         value = headers.get("Retry-After") or headers.get("retry-after")
     elif isinstance(headers, dict):
@@ -87,25 +122,8 @@ def _retry_delay(attempt: int, base_delay: float) -> float:
 
 def _is_retryable_transport_error(exc: Exception) -> bool:
     """Return True for transient network failures that should be retried."""
-    if httpx is not None and isinstance(exc, (httpx.ConnectError, httpx.TimeoutException)):
+    if isinstance(exc, (httpx.ConnectError, httpx.TimeoutException)):
         return True
-
-    try:
-        import aiohttp
-    except ImportError:
-        aiohttp = None
-
-    if aiohttp is not None and isinstance(
-        exc,
-        (
-            aiohttp.ClientConnectionError,
-            aiohttp.ClientConnectorError,
-            aiohttp.ClientOSError,
-            aiohttp.ServerDisconnectedError,
-        ),
-    ):
-        return True
-
     if isinstance(exc, (ConnectionResetError, TimeoutError, urllib.error.URLError)):
         return True
     return False
@@ -115,29 +133,11 @@ def _is_retryable_status(status: int) -> bool:
     return status in {502, 503, 504}
 
 
-def _retry_with_backoff(fn, max_retries: int, base_delay: float):
-    """Execute *fn* and retry transient failures with exponential back-off."""
-    for attempt in range(max_retries + 1):
-        try:
-            return fn()
-        except Exception as exc:
-            if attempt >= max_retries or not _is_retryable_error(exc):
-                raise
-            delay = _retry_delay(attempt, base_delay)
-            logger.debug(
-                "Retrying request after transient failure (attempt %s/%s) in %.3fs",
-                attempt + 1,
-                max_retries + 1,
-                delay,
-            )
-            time.sleep(delay)
-
-
 def _is_retryable_error(exc: Exception) -> bool:
     if _is_retryable_transport_error(exc):
         return True
 
-    if httpx is not None and isinstance(exc, httpx.HTTPStatusError):
+    if isinstance(exc, httpx.HTTPStatusError):
         return _is_retryable_status(exc.response.status_code)
 
     if isinstance(exc, HTTPError):
@@ -216,13 +216,34 @@ def _raise_for_status(
                 wait,
             )
             return wait
-        raise NetworkError(f"Request failed with transient server error: {status}", status_code=status)
+        raise NetworkError(
+            f"Request failed with transient server error: {status}",
+            status_code=status,
+        )
 
     try:
         detail = json.loads(body).get("error", {}).get("message", "")
     except Exception:
         detail = body.decode("utf-8", errors="replace")[:200]
     raise HTTPError(f"HTTP {status}: {detail}".strip(), status_code=status)
+
+
+def _retry_with_backoff(fn, max_retries: int, base_delay: float):
+    """Execute *fn* and retry transient failures with exponential back-off."""
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if attempt >= max_retries or not _is_retryable_error(exc):
+                raise
+            delay = _retry_delay(attempt, base_delay)
+            logger.debug(
+                "Retrying request after transient failure (attempt %s/%s) in %.3fs",
+                attempt + 1,
+                max_retries + 1,
+                delay,
+            )
+            time.sleep(delay)
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +291,7 @@ def _field_errors(data: Any) -> Optional[Any]:
     return None
 
 
-def _parse_response(response: "httpx.Response") -> Dict[str, Any]:
+def _parse_response(response: httpx.Response) -> Dict[str, Any]:
     """Parse an ``httpx.Response`` into a dict, mapping errors to typed exceptions.
 
     This is the single funnel every resource method should route responses
@@ -427,12 +448,14 @@ class SyncHTTPClient:
     def _build_request(
         self, method: str, path: str, payload: Optional[Dict[str, Any]]
     ) -> urllib.request.Request:
-        url = f"{self.base_url}/{path.lstrip('/')}"
+        """Build a ``urllib.request.Request`` for sync execution."""
+        params = _build_request(method, path, self.base_url, self.api_key, payload)
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
-        req = urllib.request.Request(url, data=data, method=method.upper())
-        req.add_header("Authorization", f"Bearer {self.api_key}")
-        req.add_header("Content-Type", "application/json")
-        req.add_header("Accept", "application/json")
+        req = urllib.request.Request(
+            params["url"], data=data, method=params["method"]
+        )
+        for key, value in params["headers"].items():
+            req.add_header(key, value)
         return req
 
     def request(
@@ -498,12 +521,12 @@ class SyncHTTPClient:
 
 
 # ---------------------------------------------------------------------------
-# Asynchronous client
+# Asynchronous client (httpx.AsyncClient)
 # ---------------------------------------------------------------------------
 
 class AsyncHTTPClient:
     """
-    Async counterpart of ``SyncHTTPClient``.  Uses ``aiohttp`` under the hood.
+    Async counterpart of ``SyncHTTPClient``. Uses ``httpx.AsyncClient``.
 
     Parameters
     ----------
@@ -523,6 +546,26 @@ class AsyncHTTPClient:
         self.max_retries = _config.max_retries if max_retries is None else max_retries
         self.timeout = _config.timeout if timeout is None else timeout
         validate_client_settings(self.timeout, self.max_retries)
+        self._client: Optional[httpx.AsyncClient] = None
+        self._owns_client = True
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Return the shared AsyncClient instance, creating it if needed."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self._client
+
+    async def aclose(self) -> None:
+        """Explicitly close the underlying AsyncClient."""
+        if self._client is not None and self._owns_client:
+            await self._client.aclose()
+            self._client = None
+
+    async def __aenter__(self) -> "AsyncHTTPClient":
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        await self.aclose()
 
     async def request(
         self,
@@ -540,66 +583,51 @@ class AsyncHTTPClient:
 
         Raises
         ------
-        RateLimitError, HTTPError
-            Same semantics as ``SyncHTTPClient.request``.
-        ImportError
-            If ``aiohttp`` is not installed.
+        RateLimitError
+            If 429 and ``max_retries`` is exhausted.
+        HTTPError
+            For other non-2xx responses.
         """
-        import asyncio  # stdlib — always available
-
-        try:
-            import aiohttp
-        except ImportError as exc:
-            raise ImportError(
-                "aiohttp is required for async support. "
-                "Install it with: pip install aiohttp"
-            ) from exc
-
-        url_base = self.base_url
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-        connector = aiohttp.TCPConnector()
-        timeout_cfg = aiohttp.ClientTimeout(total=self.timeout)
-
+        params = _build_request(method, path, self.base_url, self.api_key, payload)
+        client = await self._get_client()
         attempt = 0
-        async with aiohttp.ClientSession(
-            connector=connector, timeout=timeout_cfg
-        ) as session:
-            while True:
-                url = f"{url_base}/{path.lstrip('/')}"
-                try:
-                    resp = await session.request(
-                        method.upper(),
-                        url,
-                        json=payload,
-                        headers=headers,
-                    )
-                    body = await resp.read()
-                except Exception as exc:
-                    if _is_retryable_transport_error(exc):
-                        if attempt >= self.max_retries:
-                            raise NetworkError(
-                                "Request failed after exhausting retries",
-                                status_code=None,
-                            ) from exc
-                        delay = _retry_delay(attempt, _BASE_BACKOFF)
-                        logger.debug(
-                            "Retrying request after transient failure (attempt %s/%s) in %.3fs",
-                            attempt + 1,
-                            self.max_retries + 1,
-                            delay,
-                        )
-                        await asyncio.sleep(delay)
-                        attempt += 1
-                        continue
-                    raise
-                wait = _raise_for_status(
-                    resp.status, resp.headers, body, attempt, self.max_retries
+
+        while True:
+            try:
+                response = await client.request(
+                    params["method"],
+                    params["url"],
+                    headers=params["headers"],
+                    json=params["json"],
                 )
-                if wait is None:
-                    return json.loads(body) if body else {}
-                await asyncio.sleep(wait)
-                attempt += 1
+                body = response.content
+            except Exception as exc:
+                if _is_retryable_transport_error(exc):
+                    if attempt >= self.max_retries:
+                        raise NetworkError(
+                            "Request failed after exhausting retries",
+                            status_code=None,
+                        ) from exc
+                    delay = _retry_delay(attempt, _BASE_BACKOFF)
+                    logger.debug(
+                        "Retrying request after transient failure (attempt %s/%s) in %.3fs",
+                        attempt + 1,
+                        self.max_retries + 1,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    attempt += 1
+                    continue
+                raise
+
+            wait = _raise_for_status(
+                response.status_code,
+                response.headers,
+                body,
+                attempt,
+                self.max_retries,
+            )
+            if wait is None:
+                return json.loads(body) if body else {}
+            await asyncio.sleep(wait)
+            attempt += 1
