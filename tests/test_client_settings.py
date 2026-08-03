@@ -25,11 +25,10 @@ from shade.http import SyncHTTPClient
 
 @pytest.fixture(autouse=True)
 def _reset_client_settings():
-    original_timeout = _config.timeout
-    original_max_retries = _config.max_retries
+    _config.reset()
     yield
-    _config.timeout = original_timeout
-    _config.max_retries = original_max_retries
+    _config.reset()
+
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +106,23 @@ class TestPerClientSettings:
         assert client._http.timeout == 5.0
         assert client._http.max_retries == 1
 
+    def test_timeout_reaches_the_httpx_transport(self):
+        client = ShadeClient(api_key="test-key", timeout=5.0)
+
+        with patch.object(client._client._http, "request") as mock_request:
+            client.request("GET", "/payments")
+
+        assert mock_request.call_args.kwargs["timeout"] == 5.0
+
+    def test_module_level_timeout_reaches_the_httpx_transport(self):
+        shade.timeout = 7.0
+        client = ShadeClient(api_key="test-key")
+
+        with patch.object(client._client._http, "request") as mock_request:
+            client.request("GET", "/payments")
+
+        assert mock_request.call_args.kwargs["timeout"] == 7.0
+
     def test_invalid_timeout_on_client_raises(self):
         with pytest.raises(ValueError, match="timeout must be greater than 0"):
             ShadeClient(api_key="test-key", timeout=-1.0)
@@ -179,6 +195,11 @@ class TestMaxRetriesBehaviour:
         mock_sleep.assert_not_called()
 
 
-class TestShadeClientAlias:
-    def test_shade_client_is_gateway(self):
-        assert ShadeClient is Gateway
+class TestShadeClientRelationship:
+    def test_gateway_is_a_shade_client(self):
+        assert issubclass(Gateway, ShadeClient)
+
+    def test_gateway_inherits_client_settings(self):
+        gateway = Gateway(api_key="test-key", timeout=7.0, max_retries=1)
+        assert gateway._http.timeout == 7.0
+        assert gateway._http.max_retries == 1

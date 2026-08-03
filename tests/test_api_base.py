@@ -201,13 +201,13 @@ class TestEnvironment:
 
 
 # ---------------------------------------------------------------------------
-# ShadeClient alias
+# ShadeClient
 # ---------------------------------------------------------------------------
 
-class TestShadeClientAlias:
-    def test_shade_client_is_gateway(self):
+class TestShadeClient:
+    def test_gateway_is_a_shade_client(self):
         from shade import ShadeClient
-        assert ShadeClient is Gateway
+        assert issubclass(Gateway, ShadeClient)
 
     def test_shade_client_accepts_api_base(self):
         from shade import ShadeClient

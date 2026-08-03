@@ -7,6 +7,7 @@ from shade import (
     NotFoundError,
     RateLimitError,
     ShadeError,
+    SignatureVerificationError,
 )
 from shade.errors import raise_for_invalid_request
 
@@ -69,6 +70,7 @@ def test_package_root_exports_error_classes():
     assert shade.NetworkError is NetworkError
     assert shade.NotFoundError is NotFoundError
     assert shade.RateLimitError is RateLimitError
+    assert shade.SignatureVerificationError is SignatureVerificationError
 
 
 def test_invalid_request_error_parses_param_from_body():
@@ -211,3 +213,40 @@ def test_not_found_error_invalid_json_body():
 
     assert error.resource_type is None
     assert error.resource_id is None
+
+
+def test_signature_verification_error_is_shade_error():
+    error = SignatureVerificationError("bad signature", header="t=1,v1=abc")
+
+    assert isinstance(error, ShadeError)
+    assert str(error) == "bad signature"
+    assert error.header == "t=1,v1=abc"
+
+
+def test_signature_verification_error_header_optional():
+    error = SignatureVerificationError("bad signature")
+
+    assert error.header is None
+
+
+def test_signature_verification_error_from_mismatch_stores_header():
+    error = SignatureVerificationError.from_mismatch(header="t=1,v1=deadbeef")
+
+    assert isinstance(error, ShadeError)
+    assert error.header == "t=1,v1=deadbeef"
+
+
+def test_signature_verification_error_from_mismatch_explains_causes():
+    error = SignatureVerificationError.from_mismatch(header="t=1,v1=deadbeef")
+
+    message = str(error)
+    assert "secret" in message
+    assert "payload" in message
+
+
+def test_signature_verification_error_never_includes_expected_signature():
+    expected_signature = "supersecrethmacvalue"
+    error = SignatureVerificationError.from_mismatch(header="t=1,v1=deadbeef")
+
+    assert expected_signature not in str(error)
+    assert not hasattr(error, "expected_signature")
