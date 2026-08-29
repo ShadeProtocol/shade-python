@@ -36,5 +36,9 @@ def test_process_payment_async():
 
     assert result == mock_response
     mock_req.assert_called_once_with(
-        "POST", "/payments", {"amount": 50.0, "currency": "EUR"}
+        "POST",
+        "/payments",
+        params=None,
+        json={"amount": 50.0, "currency": "EUR"},
+        headers=None,
     )

@@ -17,8 +17,8 @@ import httpx
 
 from .config import Environment, validate_client_settings
 from .config import config as _config
-from .http import AsyncHTTPClient, HTTPXTransport
-from .http_client import _SyncHTTPClient
+from .http import HTTPXTransport
+from .http_client import _AsyncHTTPClient, _SyncHTTPClient
 
 API_KEY_ENV_VAR = "SHADE_API_KEY"
 ENVIRONMENT_ENV_VAR = "SHADE_ENVIRONMENT"
@@ -105,13 +105,7 @@ class ShadeClient:
             max_retries=self._max_retries,
             timeout=self._timeout,
         )
-        self._async_http = AsyncHTTPClient(
-            base_url=self._api_base,
-            api_key=self._api_key,
-            environment=self._environment,
-            max_retries=self._max_retries,
-            timeout=self._timeout,
-        )
+        self._async_http_instance: Optional[_AsyncHTTPClient] = None
         self._client = HTTPXTransport(
             api_key=self._api_key,
             base_url=self._api_base,
@@ -120,6 +114,18 @@ class ShadeClient:
             debug=debug,
             http_client=http_client,
         )
+
+    @property
+    def _async_http(self) -> _AsyncHTTPClient:
+        if self._async_http_instance is None:
+            self._async_http_instance = _AsyncHTTPClient(
+                api_base=self._api_base,
+                api_key=self._api_key,
+                environment=self._environment,
+                max_retries=self._max_retries,
+                timeout=self._timeout,
+            )
+        return self._async_http_instance
 
     @classmethod
     def from_env(cls, **overrides: Any) -> "ShadeClient":
@@ -154,7 +160,8 @@ class ShadeClient:
     def api_key(self, value: Optional[str]) -> None:
         self._api_key = value
         self._http.api_key = value
-        self._async_http.api_key = value
+        if self._async_http_instance is not None:
+            self._async_http_instance.api_key = value
         self._client.api_key = value
 
     @property
@@ -168,7 +175,8 @@ class ShadeClient:
         parsed = _config.parse_environment(value)
         self._environment = parsed
         self._http.environment = parsed
-        self._async_http.environment = parsed
+        if self._async_http_instance is not None:
+            self._async_http_instance.environment = parsed
         self._client.environment = parsed
 
     @property
@@ -196,11 +204,23 @@ class ShadeClient:
         self._http.close()
         self._client.close()
 
+    async def aclose(self) -> None:
+        self.close()
+        if self._async_http_instance is not None:
+            await self._async_http_instance.aclose()
+            self._async_http_instance = None
+
     def __enter__(self) -> "ShadeClient":
         return self
 
     def __exit__(self, *args: Any) -> None:
         self.close()
+
+    async def __aenter__(self) -> "ShadeClient":
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        await self.aclose()
 
     def request(
         self,

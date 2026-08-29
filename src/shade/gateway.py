@@ -39,8 +39,7 @@ class Gateway(ShadeClient):
         self, amount: float, currency: str
     ) -> Dict[str, Any]:
         """Async variant of :meth:`process_payment`."""
-        return await self._async_http.request(
-            "POST",
+        return await self._async_http.post(
             "/payments",
-            {"amount": amount, "currency": currency},
+            json={"amount": amount, "currency": currency},
         )

@@ -49,7 +49,7 @@ class BaseResource:
         payload: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Async counterpart of :meth:`_request`."""
-        return await self.client._async_http.request(method, path, payload)
+        return await self.client._async_http.request(method, path, json=payload)
 
     def __repr__(self) -> str:
         if self._explicit_client is None:
