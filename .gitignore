@@ -104,7 +104,6 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
 .venv
 env/
 venv/
@@ -138,3 +137,5 @@ cython_debug/
 
 # PyCharm
 .idea/
+config.bat
+node_modules
